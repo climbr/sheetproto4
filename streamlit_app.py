@@ -64,14 +64,14 @@ if "embedder" not in st.session_state:
     st.session_state.embedder = None
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
+if "generated_suggestions" not in st.session_state:
+    st.session_state.generated_suggestions = {}
 
 @st.cache_resource
 def load_llm_and_embedder():
     """Load the LLM and the embedding model."""
     try:
-        # For a small, fast model, you can use a text2text generation model
         llm_pipeline = pipeline("text2text-generation", model="google/flan-t5-small")
-        # For embeddings
         embedder = SentenceTransformer('all-MiniLM-L6-v2')
         return llm_pipeline, embedder
     except Exception as e:
@@ -85,11 +85,14 @@ def process_documents(uploaded_files, embedder):
         if file.type == "text/plain":
             all_text += file.read().decode("utf-8")
         elif file.type == "application/pdf":
-            with pdfplumber.open(file) as pdf:
-                for page in pdf.pages:
-                    all_text += page.extract_text() + "\n"
+            try:
+                with pdfplumber.open(file) as pdf:
+                    for page in pdf.pages:
+                        all_text += page.extract_text() + "\n"
+            except Exception as e:
+                st.error(f"Error processing PDF file: {e}")
+                continue
     
-    # Simple chunking
     chunks = [all_text[i:i + 512] for i in range(0, len(all_text), 512)]
     
     if not chunks:
@@ -97,7 +100,6 @@ def process_documents(uploaded_files, embedder):
         
     embeddings = embedder.encode(chunks)
     
-    # Create a FAISS index
     dimension = embeddings.shape[1]
     index = faiss.IndexFlatL2(dimension)
     index.add(embeddings)
@@ -110,7 +112,7 @@ def generate_test_case_context(test_case_description, vector_store, chunks, llm_
         return "Please upload and process context documents first."
     
     query_embedding = st.session_state.embedder.encode([test_case_description])
-    D, I = vector_store.search(query_embedding, 3)  # Search for top 3 similar chunks
+    D, I = vector_store.search(query_embedding, 3)
     
     retrieved_docs = [chunks[i] for i in I[0]]
     
@@ -129,7 +131,6 @@ def generate_test_case_context(test_case_description, vector_store, chunks, llm_
     Detailed Analysis and Suggestions:
     """
     
-    # Generate the response
     try:
         response = llm_pipeline(prompt, max_length=512, do_sample=False)
         return response[0]['generated_text']
@@ -146,7 +147,6 @@ def main():
     
     uploaded_file = st.sidebar.file_uploader("Upload Test Cases CSV", type=["csv"])
     
-    # --- DOCUMENT UPLOAD AND PROCESSING SECTION ---
     st.header("📄 Context & Business Rules")
     uploaded_context_files = st.file_uploader("Upload documents for context (PDF, TXT)", type=["pdf", "txt"], accept_multiple_files=True)
     
@@ -162,25 +162,21 @@ def main():
             else:
                 st.warning("Could not process documents. Please check the file contents.")
 
-    # --- END OF DOCUMENT UPLOAD AND PROCESSING ---
-
     if uploaded_file is not None:
         df = pd.read_csv(uploaded_file)
         if 'Test Status' not in df.columns:
             df['Test Status'] = 'Pending'
         
-        # Initialize session state for the dataframe and filters
         if 'df' not in st.session_state or not st.session_state.df.equals(df):
             st.session_state.df = df
             st.session_state.show_changes = False
             st.session_state.changes = []
-
+        
         if 'show_changes' not in st.session_state:
             st.session_state.show_changes = False
             st.session_state.changes = []
 
     if st.session_state.get('df') is not None and not st.session_state.df.empty:
-        # Display filters
         st.sidebar.markdown("---")
         st.sidebar.header("🔍 Filters")
         categories = ["All"] + list(st.session_state.df['Category'].unique())
@@ -191,7 +187,6 @@ def main():
         
         search_query = st.sidebar.text_input("Search Test Cases")
         
-        # Apply filters
         filtered_df = st.session_state.df.copy()
         if selected_category != "All":
             filtered_df = filtered_df[filtered_df['Category'] == selected_category]
@@ -212,7 +207,6 @@ def main():
     else:
         st.info("👆 Please upload a CSV file to get started.")
         
-        # Show sample format
         with st.expander("📋 Expected CSV Format"):
             st.write("Your CSV should have these columns:")
             sample_data = {
@@ -239,21 +233,18 @@ def display_test_cases(df):
                 st.write(f"**Category:** {row['Category']}")
                 st.write(f"**Test Env:** {row['Test Env']}")
                 
-                # Dynamic status display with color
                 status_color = "green" if row['Test Status'] == "Passed" else ("red" if row['Test Status'] == "Failed" else "gray")
                 st.markdown(f"**Status:** <span style='color:{status_color}'>**{row['Test Status']}**</span>", unsafe_allow_html=True)
+
+                st.markdown("---")
                 
-                # Update status in sidebar
-                st.sidebar.markdown("---")
-                st.sidebar.markdown(f"**Update Status for {row['ID']}**")
+                new_status = st.radio("Select New Status", ('Pending', 'Passed', 'Failed'), key=f"status_{index}")
                 
-                new_status = st.sidebar.radio("Select New Status", ('Pending', 'Passed', 'Failed'), key=f"status_{index}")
-                
-                if st.sidebar.button("Update Status", key=f"update_{index}"):
+                if st.button("Update Status", key=f"update_{index}"):
                     old_status = st.session_state.df.loc[st.session_state.df['ID'] == row['ID'], 'Test Status'].iloc[0]
                     st.session_state.df.loc[st.session_state.df['ID'] == row['ID'], 'Test Status'] = new_status
                     st.session_state.df.loc[st.session_state.df['ID'] == row['ID'], 'Date of Last Test'] = datetime.now().strftime("%Y-%m-%d")
-                    st.session_state.df.loc[st.session_state.df['ID'] == row['ID'], 'Observed Outcome'] = '' # Reset for new test run
+                    st.session_state.df.loc[st.session_state.df['ID'] == row['ID'], 'Observed Outcome'] = ''
                     
                     st.session_state.show_changes = True
                     st.session_state.changes.append({
@@ -269,7 +260,6 @@ def display_test_cases(df):
                 st.write(f"**Test Input:** {row['Test Input']}")
                 st.write(f"**Expected Outcome:** {row['Expected Outcome']}")
                 
-                # Check for empty observed outcome before displaying
                 if pd.notna(row.get('Observed Outcome')) and row['Observed Outcome'].strip():
                     st.write(f"**Observed Outcome:** {row['Observed Outcome']}")
                 
@@ -277,19 +267,24 @@ def display_test_cases(df):
                 
                 st.write(f"**Last Tested:** {row['Date of Last Test']}")
 
-            # --- NEW SECTION FOR GENERATING CONTEXT ---
+            # New section for generated context
             st.subheader("💡 AI-Generated Context & Best Practices")
             
+            # Button to generate suggestion
             if st.button("Generate Context", key=f"gen_btn_{index}"):
                 if st.session_state.vector_store and st.session_state.llm_pipeline and st.session_state.chunks:
                     with st.spinner('Generating context...'):
                         context_info = generate_test_case_context(row['Test Description'], st.session_state.vector_store, st.session_state.chunks, st.session_state.llm_pipeline)
-                        st.write(context_info)
+                        st.session_state.generated_suggestions[row['ID']] = context_info
+                        st.rerun()
                 else:
                     st.warning("Please upload and process your context documents first to enable this feature.")
-            # --- END OF NEW SECTION ---
 
-    # Export button outside of the loop
+            # Display suggestion if it exists for this test case
+            if row['ID'] in st.session_state.generated_suggestions:
+                with st.expander("See AI Suggestion"):
+                    st.write(st.session_state.generated_suggestions[row['ID']])
+
     st.sidebar.markdown("---")
     st.sidebar.download_button(
         label="📥 Download Updated CSV",
